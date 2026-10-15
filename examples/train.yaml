@@ -1,0 +1,12 @@
+model_name: my-cross-goose
+output_dir: runs
+dataset_path: /absolute/path/to/dataset
+architecture: default
+starting_point: scratch
+device: cpu
+epochs: 10
+# All omitted architecture, sampler, augmentation and optimizer settings use
+# upstream configs/model.yaml defaults. These options reduce CPU memory use:
+batch_size: 2
+num_workers: 0
+previews: true

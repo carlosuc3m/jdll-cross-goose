@@ -1,0 +1,4 @@
+include README_IMPLEMENTATION_REQUIREMENTS.md
+recursive-include docs *.md
+recursive-include examples *.yaml *.py
+recursive-include tests *.py *.md *.tif *.txt

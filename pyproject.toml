@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jdll-cross-goose"
+version = "0.1.0"
+description = "Cross-GOOSE inference and training adapter for JDLL and Python"
+readme = "README.md"
+license-files = ["THIRD_PARTY_LICENSES.txt"]
+requires-python = ">=3.11"
+dependencies = [
+  "crossgoose @ git+https://github.com/bia-pasteur/cross-goose.git@4e7ffa3c71ad0c5d59b364dd3bf0e5787c8bd79f",
+  "numpy>=2,<3",
+  "torch>=2.4,<3",
+  "lightning>=2.5,<3",
+  "PyYAML>=6",
+  "Pillow>=10",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "build", "ruff"]
+
+[project.scripts]
+jdll-cross-goose = "jdll_cross_goose.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["jdll_cross_goose*"]
+
+[tool.setuptools.package-data]
+jdll_cross_goose = ["configs/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: exercises the real upstream model", "accelerator: requires CUDA or MPS"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
