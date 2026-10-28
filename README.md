@@ -2,8 +2,9 @@
 
 Run [Cross-GOOSE](https://github.com/bia-pasteur/cross-goose) instance segmentation
 and training from Python, the command line, or a JDLL/Appose task. Appose itself is
-not a dependency. This adapter imports a pinned upstream package; no separate
-fork or modified upstream installation is required.
+not a dependency. Installation automatically pulls a revision-pinned fork of the
+upstream package. The fork changes only the dependency from regular to headless
+OpenCV; the upstream model code is unchanged.
 
 ## Install
 

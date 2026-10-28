@@ -10,7 +10,7 @@ readme = "README.md"
 license-files = ["THIRD_PARTY_LICENSES.txt"]
 requires-python = ">=3.11"
 dependencies = [
-  "crossgoose @ git+https://github.com/bia-pasteur/cross-goose.git@4e7ffa3c71ad0c5d59b364dd3bf0e5787c8bd79f",
+  "crossgoose @ git+https://github.com/carlosuc3m/cross-goose.git@2eef5e347801da8a389117d21dd88cc9b6c35c40",
   "numpy>=2,<3",
   "torch>=2.4,<3",
   "lightning>=2.5,<3",
