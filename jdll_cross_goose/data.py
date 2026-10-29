@@ -18,8 +18,8 @@ from torch.utils.data import DataLoader, Dataset
 from .images import channels, normalize, read_image, read_mask
 from .runtime import atomic_path, write_json
 
-IMAGE_EXTENSIONS = {".tiff", ".tif", ".png", ".jpeg", ".jpg", ".bmp"}
-MASK_EXTENSIONS = {".tiff", ".tif", ".png", ".bmp"}
+IMAGE_EXTENSIONS = {".tiff", ".tif", ".png", ".jpeg", ".jpg", ".bmp", ".npy"}
+MASK_EXTENSIONS = {".tiff", ".tif", ".png", ".bmp", ".npy"}
 
 
 @dataclass
@@ -40,12 +40,16 @@ def stem(path, mask=False):
 
 def _indexed(directory, extensions, *, mask=False):
     result = {}
-    for path in sorted(directory.iterdir()) if directory.is_dir() else []:
-        if path.is_file() and path.suffix.lower() in extensions:
-            key = stem(path, mask)
-            if key in result:
-                raise ValueError(f"Ambiguous normalized stem '{key}': {result[key]}, {path}")
-            result[key] = path.resolve()
+    paths = sorted(directory.iterdir()) if directory.is_dir() else []
+    paths = [path for path in paths if path.suffix.lower() in extensions and path.is_file()]
+    raster_stems = {path.stem.casefold() for path in paths if path.suffix.lower() != ".npy"} if not mask else set()
+    for path in paths:
+        if not mask and path.suffix.lower() == ".npy" and path.stem.casefold() in raster_stems:
+            continue
+        key = stem(path, mask)
+        if key in result:
+            raise ValueError(f"Ambiguous normalized stem '{key}': {result[key]}, {path}")
+        result[key] = path.resolve()
     return result
 
 

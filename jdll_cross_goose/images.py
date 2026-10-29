@@ -8,6 +8,8 @@ import imageio.v3 as iio
 import numpy as np
 import tifffile
 
+from .numpy_images import NumpyImage
+
 
 def finite_image(image):
     if not isinstance(image, np.ndarray) or image.ndim != 3 or min(image.shape) < 1:
@@ -42,8 +44,17 @@ def normalize(image, method):
     return np.ascontiguousarray(result)
 
 
-def read_array(path):
+def read_array(path, *, mask=False):
     path = Path(path)
+    if path.suffix.lower() == ".npy":
+        with NumpyImage(path) as image:
+            array, axes = image.array, image.axes(mask=mask, dimensions=2)
+            for index in reversed(range(len(axes))):
+                if axes[index] in "ZT":
+                    array = array[tuple(0 if i == index else slice(None) for i in range(array.ndim))]
+                    axes = axes[:index] + axes[index + 1:]
+            target = "CYX" if "C" in axes else "YX"
+            return array.transpose(tuple(axes.index(axis) for axis in target)), target
     if path.suffix.lower() in {".tif", ".tiff"}:
         with tifffile.TiffFile(path) as tif:
             return tif.asarray(), tif.series[0].axes
@@ -72,11 +83,15 @@ def to_cyx(array, axes=None):
 
 def read_image(path, axes=None):
     image, stored_axes = read_array(path)
+    if Path(path).suffix.lower() == ".npy":
+        axes = stored_axes
     return np.ascontiguousarray(finite_image(to_cyx(image, axes or stored_axes)))
 
 
 def read_mask(path, axes=None, events=None):
-    mask, stored_axes = read_array(path)
+    mask, stored_axes = read_array(path, mask=True)
+    if Path(path).suffix.lower() == ".npy":
+        axes = stored_axes
     if mask.ndim == 3:
         mask = to_cyx(mask, axes or stored_axes)
         if mask.shape[0] > 1 and events:
