@@ -39,6 +39,7 @@ REQUIRED = {
     "epochs",
 }
 OPTIONS = {
+    "model_dir",
     "base_model",
     "checkpoint",
     "batch_size",
@@ -209,6 +210,16 @@ class Progress(L.Callback):
 
     def on_train_start(self, trainer, pl_module):
         self.total_steps = int(trainer.estimated_stepping_batches)
+        self.emit_progress(trainer, epoch=0)
+
+    def emit_progress(self, trainer, *, epoch=None):
+        self.events.emit({
+            "type": "progress", "message": "",
+            "epoch": trainer.current_epoch + 1 if epoch is None else epoch,
+            "step": trainer.global_step, "total_epochs": trainer.max_epochs,
+            "total_steps": self.total_steps, "current": trainer.global_step,
+            "maximum": self.total_steps, "losses": {}, "metrics": {},
+        })
 
     def on_train_epoch_start(self, trainer, pl_module):
         self.events.message(
@@ -225,6 +236,9 @@ class Progress(L.Callback):
         loss = outputs["loss"] if isinstance(outputs, dict) else outputs
         if not torch.isfinite(loss).all():
             raise TrainingError("Training produced a non-finite loss")
+        every = 1 if pl_module.device.type == "cpu" else 5
+        if trainer.global_step % every == 0:
+            self.emit_progress(trainer)
 
     def on_validation_start(self, trainer, pl_module):
         self.events.message(f"Validating epoch {trainer.current_epoch + 1}", kind="validation")
@@ -280,6 +294,7 @@ class Progress(L.Callback):
         self.events.emit(
             {
                 "type": "progress",
+                "epoch_complete": True,
                 "message": f"Epoch {epoch}: train loss {losses['train/total_loss']:.5f}, val AP@0.75 {score:.4f}",
                 "epoch": epoch,
                 "step": trainer.global_step,
@@ -307,8 +322,12 @@ class Progress(L.Callback):
 def run(request, events):
     request = copy.deepcopy(request)
     cfg = resolve_config(request)
-    directory = (Path(request["output_dir"]).expanduser() / request["model_name"]).resolve()
-    if directory.exists() and any(directory.iterdir()):
+    # JDLL already chooses a unique final directory and starts its UI log there.
+    # Keep output_dir/model_name for existing standalone Python callers.
+    directory = Path(request.get("model_dir") or
+                     Path(request["output_dir"]).expanduser() / request["model_name"]).expanduser().resolve()
+    if directory.exists() and any(p.name != "training-ui.log" or not p.is_file()
+                                  for p in directory.iterdir()):
         raise FileExistsError(
             f"Model output directory is not empty: {directory}; choose a new model_name"
         )

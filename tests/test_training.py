@@ -27,10 +27,12 @@ def test_scratch_and_fine_tune_checkpoints_progress_previews(training_config):
     assert config["data"]["num_workers"] == 0
     assert config["optimizer"]["class_path"] == "torch.optim.AdamW"
     assert config["adapter"]["object_size_statistics"]["median"] > 0
-    (progress,) = [e for e in events if e["type"] == "progress"]
+    (progress,) = [e for e in events if e.get("epoch_complete")]
     assert progress["epoch"] == 1 and progress["step"] == progress["total_steps"] == 2
     assert set(progress["metrics"]) == {"val/ap_0.5", "val/ap_0.75", "val/ap_0.9"}
     assert np.isfinite(list(progress["losses"].values())).all()
+    steps = [e["step"] for e in events if e["type"] == "progress" and not e.get("epoch_complete")]
+    assert steps == [0, 1, 2]
     (preview,) = [e for e in events if e["type"] == "preview"]
     payload = json.loads(Path(preview["preview_path"]).read_text())
     assert payload == json.loads(Path(preview["latest_preview_path"]).read_text())
@@ -67,7 +69,7 @@ def test_cancel_after_epoch_keeps_checkpoint_and_distinct_status(training_config
 
     def cancel(event):
         events.append(event)
-        return False if event["type"] == "progress" else None
+        return False if event.get("epoch_complete") else None
 
     with pytest.raises(CancelledError):
         train({**training_config, "epochs": 3}, callback=cancel)
@@ -131,6 +133,24 @@ def test_unsupported_options_fail_before_output_creation(training_config):
     with pytest.raises(ValueError, match="Unknown training"):
         train({**training_config, "learning_arte": 0.1})
     assert not Path(training_config["output_dir"]).exists()
+
+
+@pytest.mark.integration
+def test_exact_model_directory_keeps_ui_log_and_protects_existing_weights(training_config, tmp_path):
+    directory = tmp_path / "selected-model"
+    directory.mkdir()
+    ui_log = directory / "training-ui.log"
+    ui_log.write_text("Starting training\n")
+    request = {**training_config, "model_dir": str(directory), "previews": False}
+    result = train(request)
+    assert Path(result["model_dir"]) == directory
+    assert ui_log.read_text() == "Starting training\n"
+    assert not (directory / training_config["model_name"]).exists()
+    checkpoint = Path(result["last_checkpoint"])
+    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    with pytest.raises(FileExistsError, match="not empty"):
+        train(request)
+    assert hashlib.sha256(checkpoint.read_bytes()).hexdigest() == digest
 
 
 @pytest.mark.integration

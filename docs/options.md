@@ -69,6 +69,7 @@ weights with that topology. Optional documented overrides:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
+| `model_dir` | `output_dir/model_name` | Exact final model directory, used by JDLL. An existing `training-ui.log` is permitted; all other existing files/directories are refused to protect previous runs. |
 | `checkpoint` | `best` for fine-tuning | Base checkpoint selector |
 | `batch_size`, `val_batch_size` | 8, 2 | Data-loader batch sizes |
 | `num_workers` | 0 | Worker processes; zero runs data loading in the calling process |
@@ -101,7 +102,9 @@ Progress events contain epoch, step, total_epochs, total_steps, current, maximum
 `losses` (`train/total_loss`, `val/total_loss`) and `metrics` (`val/ap_0.5`,
 `val/ap_0.75`, `val/ap_0.9`). Human-readable preparation, configuration, epoch,
 validation, checkpoint, warning and terminal messages use separate events.
-There are no tqdm bars or per-batch callback messages.
+There are no tqdm bars. Lightweight progress updates occur every CPU update or
+every five accelerated updates, with empty loss/metric dictionaries. Completed
+epoch summaries include `epoch_complete=true` and the aggregated losses/metrics.
 
 ## Dataset and cancellation
 
