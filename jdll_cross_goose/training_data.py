@@ -49,6 +49,7 @@ class Record:
     normalization: dict
     diameter: float | None
     flow: str
+    label_ids: np.ndarray
 
 
 class TrainingData:
@@ -56,6 +57,7 @@ class TrainingData:
         self.config, self.directory, self.events = config, Path(directory), events
         self.records = {}
         self.loaders = []
+        self.cache_requests = {}
         self.context = image_reading_session(self.emit)
         self.session = self.context.__enter__()
         try:
@@ -241,7 +243,14 @@ class TrainingData:
                 mask = load_domain_mask(pair, "2d", self.reader, raw=True)
                 manifest = self.flows.prepare(mask, analysis, self.config["center_method"])
                 del mask
-                self.records[key] = Record(pair, analysis, normalization, diameter, manifest)
+                self.records[key] = Record(
+                    pair,
+                    analysis,
+                    normalization,
+                    diameter,
+                    manifest,
+                    np.asarray((0, *analysis.labels), dtype=np.int64),
+                )
                 kept.append(pair)
                 self.events.message(
                     f"Prepared source {len(kept)}/{len(pairs)}: {pair.image.name}",
@@ -371,7 +380,15 @@ class TrainingData:
             )
             self.loaders.append(loader)
             result.append(loader)
+        self.refresh_cache_plan()
         return tuple(result)
+
+    def refresh_cache_plan(self):
+        requests = {}
+        for loader in self.loaders:
+            for key, count in loader.dataset.cache_requests.items():
+                requests[key] = requests.get(key, 0) + count
+        self.cache_requests = requests
 
 
 class PatchDataset(Dataset):
@@ -509,10 +526,13 @@ class PatchDataset(Dataset):
                 ]
             ] = True
         self.cache_requests = {}
+        counts = np.bincount(self.indices, minlength=len(self.pairs))
         for i, pair in enumerate(self.pairs):
-            count = int(np.count_nonzero(self.indices == i))
+            count = int(counts[i])
             for path, role in ((pair.image, "image"), (pair.mask, "mask")):
-                self.cache_requests[(str(path.absolute()), role)] = count
+                key = (str(path.absolute()), role)
+                self.cache_requests[key] = self.cache_requests.get(key, 0) + count
+        self.runtime.refresh_cache_plan()
 
     def __len__(self):
         return self.sample_count
@@ -523,15 +543,23 @@ class PatchDataset(Dataset):
         seed = stable_seed(cfg["seed"], self.epoch, f"patch:{index}")
         rng = np.random.default_rng(seed)
         source = int(self.indices[index])
-        order = [
-            source,
-            *rng.permutation(len(self.pairs))[: cfg["empty_patch_max_retries"]].tolist(),
-        ]
+        order = (
+            [source]
+            if self.validation
+            else [
+                source,
+                *rng.choice(
+                    len(self.pairs),
+                    size=min(len(self.pairs), cfg["empty_patch_max_retries"]),
+                    replace=False,
+                ).tolist(),
+            ]
+        )
         for source in order:
             pair = self.pairs[source]
             record = runtime.records[(str(pair.image), pair.region)]
             image = ImageView(runtime.raw_image(pair), record.normalization, cfg["grayscale"])
-            mask = MaskView(CropArray(pair, runtime.reader, mask=True), record.analysis.labels)
+            mask = MaskView(CropArray(pair, runtime.reader, mask=True), record.label_ids)
             if source not in self.samplers:
                 self.samplers[source] = CropSampler(
                     record.analysis, pair.domain_shape, seed=cfg["seed"], instances=True
@@ -544,7 +572,7 @@ class PatchDataset(Dataset):
             if empty:
                 geometry = replace(geometry, skip_empty_patches=False)
             try:
-                with runtime.reader.cache_plan(self.cache_requests):
+                with runtime.reader.cache_plan(runtime.cache_requests or self.cache_requests):
                     transformed, labels, valid = apply_augmentation(
                         image,
                         mask,

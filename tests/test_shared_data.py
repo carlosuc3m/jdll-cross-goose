@@ -84,6 +84,13 @@ def test_mask_view_compacts_high_ids_before_float_interpolation():
     view = MaskView(mask, (5, 100_000_001))
     assert set(np.unique(view[:, :])) == {0, 1, 2}
     assert view.labels[2] == 100_000_001
+    assert MaskView(mask, view.labels).labels is view.labels
+
+
+def test_resolved_data_defaults_are_independent(training_config):
+    first = resolve_config(training_config)
+    first["data"]["augmentation"]["noise_probability"] = 0.7
+    assert resolve_config(training_config)["data"]["augmentation"] == {}
 
 
 @pytest.mark.parametrize("method", ["M1P1", "N99"])
@@ -116,6 +123,7 @@ def test_patch_validation_is_repeatable_and_loader_does_not_change_torch_rng(
     try:
         runtime.prepare(training_config["dataset_path"])
         train, val = runtime.make_loaders()
+        assert sum(runtime.cache_requests.values()) == 2 * (len(train.dataset) + len(val.dataset))
         torch.manual_seed(101)
         before = torch.random.get_rng_state().clone()
         batch = next(iter(train))

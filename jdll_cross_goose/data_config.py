@@ -1,6 +1,7 @@
 """Serializable shared-data options, separate from Cross-GOOSE's scientific model."""
 
 import math
+from copy import deepcopy
 from dataclasses import asdict
 
 from jdll_unet.config import parse_training_config
@@ -31,7 +32,7 @@ DATA_OPTIONS = set(DATA_DEFAULTS) | {"annotation_preparation", "instance_scale_n
 
 def resolve_data_options(config, request):
     for key, default in DATA_DEFAULTS.items():
-        config[key] = request.get(key, default)
+        config[key] = deepcopy(request.get(key, default))
     config["seed"] = request.get("seed", 16)
     config["validation_fraction"] = request.get("validation_fraction", 0.15)
     options = request.get("instance_scale_normalization", {})

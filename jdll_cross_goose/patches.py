@@ -12,7 +12,9 @@ from .images import channels
 class MaskView:
     def __init__(self, source, labels):
         self.source = source
-        self.labels = np.asarray((0, *labels), dtype=np.int64)
+        self.labels = (
+            labels if isinstance(labels, np.ndarray) else np.asarray((0, *labels), dtype=np.int64)
+        )
         self.shape = source.shape
         self.ndim = 2
 
