@@ -17,6 +17,20 @@ from crossgoose.model import flow_function
 from crossgoose.model.models import CrossGooseModel
 from crossgoose.model.modules import CPBackbone
 from torch import nn
+from torch.nn import functional as F
+
+
+class ValidBCE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.validity = None
+
+    def forward(self, logits, target):
+        if self.validity is None or bool(self.validity.all()):
+            return F.binary_cross_entropy_with_logits(logits, target)
+        losses = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+        axes = tuple(range(1, losses.ndim))
+        return ((losses * self.validity).sum(axes) / self.validity.sum(axes).clamp_min(1)).mean()
 
 
 class AdapterModel(CrossGooseModel):
@@ -45,7 +59,7 @@ class AdapterModel(CrossGooseModel):
         out_c = (embeddings_dim if shared_embedding else 2 * embeddings_dim) + 1
         self.embedding_head = batchconv(self.backbone_out, out_c, sz=1)
         self.criterion_flow = nn.MSELoss(reduction="none")
-        self.criterion_cellprob = nn.BCEWithLogitsLoss(reduction="mean")
+        self.criterion_cellprob = ValidBCE()
         self.flow_fac = 5.0
         self.crit_flow_weight = crit_flow_weight
         self.crit_cellprob_weight = crit_cellprob_weight
@@ -54,9 +68,29 @@ class AdapterModel(CrossGooseModel):
         self.save_hyperparameters(ignore=["flow_fn"])
         self.optimizer_config = {"lr": 0.005, "weight_decay": 0.01}
         self.events = None
+        self._cached_features = None
+        self.validation_previews = []
+        self.preview_limit = 0
+        self.preview_max_bytes = 256 * 1024**2
+        self.optimizer_name = "adamw"
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), **self.optimizer_config)
+        optimizer = {"adamw": torch.optim.AdamW, "adam": torch.optim.Adam, "sgd": torch.optim.SGD}[
+            self.optimizer_name
+        ]
+        return optimizer(self.parameters(), **self.optimizer_config)
+
+    def image_to_maps(self, image, apply_sigmoids=False):
+        if self._cached_features is not None:
+            return self._cached_features
+        return super().image_to_maps(image, apply_sigmoids)
+
+    def compute_loss(self, batch, log_prefix=""):
+        self.criterion_cellprob.validity = batch.get("validity")
+        try:
+            return super().compute_loss(batch, log_prefix)
+        finally:
+            self.criterion_cellprob.validity = None
 
     def training_step(self, batch, batch_idx):
         # Same loss/aggregation as upstream, without attempting to write to an
@@ -80,27 +114,53 @@ class AdapterModel(CrossGooseModel):
         # The loss and AP definition remain upstream. The inference wrapper adds
         # cancellation and guards the undefined empty/empty AP case.
         import numpy as np
-        from crossgoose.cellpose.metrics import average_precision
 
-        from .inference import segment_normalized
+        from .full_validation import compact, instance_ap
+        from .inference import reconstruct
         from .runtime import CancelledError, EnvironmentError, ValidationError, is_oom
 
         try:
             self.events.check()
-            losses = self.compute_loss(batch, log_prefix="val_")
+            self._cached_features = super().image_to_maps(
+                batch["image"][:, :2], apply_sigmoids=False
+            )
+            try:
+                losses = self.compute_loss(batch, log_prefix="val_")
+                raw_maps = self._cached_features["T1"].detach().float().cpu()
+            finally:
+                self._cached_features = None
             predictions = []
             truths = []
             for index, image in enumerate(batch["image"]):
-                result = segment_normalized(
-                    self, image.cpu().numpy(), self.inference_config, self.events, progress=False
-                )
-                predictions.append(result["labels"])
-                truths.append(batch["labels"][index].cpu().numpy())
-            with np.errstate(invalid="ignore", divide="ignore"):
-                ap, _, _, _ = average_precision(truths, predictions, [0.5, 0.75, 0.9])
-            for i, (truth, prediction) in enumerate(zip(truths, predictions)):
-                if not np.any(truth) and not np.any(prediction):
-                    ap[i, :] = 1.0
+                self.events.check()
+                result = reconstruct(self, raw_maps[index], self.inference_config, self.events)
+                truth = batch["labels"][index].cpu().numpy()
+                prediction = result["labels"].copy()
+                if "validity" in batch:
+                    valid = batch["validity"][index].cpu().numpy()
+                    truth = np.where(valid, truth, 0)
+                    prediction[~valid] = 0
+                truth, prediction = compact(truth), compact(prediction)
+                predictions.append(prediction)
+                truths.append(truth)
+                if len(self.validation_previews) < self.preview_limit:
+                    sample = {
+                        "image": image.detach().float().cpu().numpy().copy(),
+                        "labels": truth,
+                        "prediction": prediction,
+                        "probability": result["cell_probability"],
+                        "metadata": batch.get("metadata", [{}] * len(batch["image"]))[index],
+                    }
+                    size = sum(v.nbytes for v in sample.values() if isinstance(v, np.ndarray))
+                    used = sum(
+                        v.nbytes
+                        for p in self.validation_previews
+                        for v in p.values()
+                        if isinstance(v, np.ndarray)
+                    )
+                    if used + size <= self.preview_max_bytes:
+                        self.validation_previews.append(sample)
+            ap = instance_ap(truths, predictions)
             for i, threshold in enumerate([0.5, 0.75, 0.9]):
                 losses[f"val_ap_{threshold}"] = float(np.mean(ap[:, i]))
             if not all(np.isfinite(float(v)) for v in losses.values()):

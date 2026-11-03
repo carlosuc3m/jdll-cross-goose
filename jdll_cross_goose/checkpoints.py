@@ -186,7 +186,7 @@ def load(model_path, device="cpu", *, criterion="last", events=None, allow_fallb
         return model, metadata
     except torch.OutOfMemoryError as exc:
         model = None
-        del state
+        state = None
         clear_error_frames(sys.exception())
         cleanup(resolved_device)
         raise EnvironmentError(
@@ -194,7 +194,7 @@ def load(model_path, device="cpu", *, criterion="last", events=None, allow_fallb
         ) from exc
     except BaseException as exc:
         model = None
-        del state
+        state = None
         clear_error_frames(sys.exception())
         cleanup(resolved_device)
         if is_oom(exc):

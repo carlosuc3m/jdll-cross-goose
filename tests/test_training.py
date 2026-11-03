@@ -27,13 +27,13 @@ def test_scratch_and_fine_tune_checkpoints_progress_previews(training_config):
     assert config["data"]["num_workers"] == 0
     assert config["optimizer"]["class_path"] == "torch.optim.AdamW"
     assert config["adapter"]["object_size_statistics"]["median"] > 0
-    (progress,) = [e for e in events if e.get("epoch_complete")]
+    (progress,) = (e for e in events if e.get("epoch_complete"))
     assert progress["epoch"] == 1 and progress["step"] == progress["total_steps"] == 2
     assert set(progress["metrics"]) == {"val/ap_0.5", "val/ap_0.75", "val/ap_0.9"}
     assert np.isfinite(list(progress["losses"].values())).all()
     steps = [e["step"] for e in events if e["type"] == "progress" and not e.get("epoch_complete")]
     assert steps == [0, 1, 2]
-    (preview,) = [e for e in events if e["type"] == "preview"]
+    (preview,) = (e for e in events if e["type"] == "preview")
     payload = json.loads(Path(preview["preview_path"]).read_text())
     assert payload == json.loads(Path(preview["latest_preview_path"]).read_text())
     sample = payload["samples"][0]
@@ -136,7 +136,9 @@ def test_unsupported_options_fail_before_output_creation(training_config):
 
 
 @pytest.mark.integration
-def test_exact_model_directory_keeps_ui_log_and_protects_existing_weights(training_config, tmp_path):
+def test_exact_model_directory_keeps_ui_log_and_protects_existing_weights(
+    training_config, tmp_path
+):
     directory = tmp_path / "selected-model"
     directory.mkdir()
     ui_log = directory / "training-ui.log"
@@ -159,9 +161,102 @@ def test_empty_dataset_trains_and_validates_for_multiple_epochs(training_config,
 
     for path in tiny_dataset.rglob("*_mask.tif"):
         tifffile.imwrite(path, np.zeros((32, 40), np.uint16))
-    result = train({**training_config, "epochs": 2, "previews": False})
+    result = train(
+        {
+            **training_config,
+            "epochs": 2,
+            "previews": False,
+            "skip_empty_images": False,
+            "skip_empty_patches": False,
+        }
+    )
     assert result["history"]["epochs"] == [1, 2]
     assert np.isfinite(result["history"]["losses"]["train/total_loss"]).all()
     state = torch.load(result["last_checkpoint"], weights_only=True, map_location="cpu")
     assert state["epoch"] == 1 and state["global_step"] == 4
     assert Path(result["best_checkpoint"]).is_file()
+
+
+@pytest.mark.integration
+def test_validation_forwards_once_and_accumulation_scheduler_count_updates(
+    training_config, monkeypatch
+):
+    import jdll_cross_goose.training as training
+
+    forwards = []
+    original = training.create_model
+
+    def create(config):
+        model = original(config)
+        model.backbone.register_forward_hook(lambda *args: forwards.append(torch.is_grad_enabled()))
+        return model
+
+    monkeypatch.setattr(training, "create_model", create)
+    result = train(
+        {**training_config, "effective_batch_size": 2, "lr_scheduler": {"type": "cosine"}}
+    )
+    state = torch.load(result["last_checkpoint"], weights_only=True, map_location="cpu")
+    config = yaml.safe_load(Path(result["config_path"]).read_text())
+    assert state["global_step"] == 2
+    assert forwards.count(True) == 4
+    assert forwards.count(False) == config["data"]["resolved_validation_patches"]
+    assert state["optimizer_states"][0]["param_groups"][0]["lr"] == 0
+
+
+@pytest.mark.integration
+def test_full_validation_requests_are_one_shot_and_do_not_change_regular_selection(training_config):
+    from jdll_unet.validation_control import FullValidationController
+
+    control = FullValidationController()
+    events = []
+
+    def callback(event):
+        events.append(event)
+        if event["type"] == "epoch_start" and event["epoch"] == 1:
+            control.request_full_validation("first")
+        if (
+            event["type"] == "full_validation"
+            and event.get("status") == "started"
+            and event["epoch"] == 1
+        ):
+            control.request_full_validation("second")
+
+    result = train({**training_config, "epochs": 2}, callback=callback, control=control)
+    passes = [
+        e for e in events if e["type"] == "full_validation" and e.get("status") == "completed"
+    ]
+    assert [e["epoch"] for e in passes] == [1, 2]
+    assert passes[0]["request_ids"] == ["first"] and passes[1]["request_ids"] == ["second"]
+    assert all(e["next_epoch"] is None for e in passes)
+    for event in passes:
+        payload = json.loads(Path(event["path"]).read_text())
+        assert payload["status"] == "completed" and len(payload["cases"]) == 1
+    assert result["history"]["epochs"] == [1, 2]
+    assert events[-1]["type"] == "completion"
+
+
+@pytest.mark.integration
+def test_full_validation_failure_preserves_regular_checkpoint(training_config, monkeypatch):
+    import jdll_cross_goose.full_validation as full
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("synthetic full-validation failure")
+
+    monkeypatch.setattr(full, "evaluate", fail)
+    events = []
+    with pytest.raises(ValidationError, match="synthetic full-validation"):
+        train({**training_config, "validation": {"full_every": 1}}, callback=events.append)
+    directory = Path(training_config["output_dir"]) / training_config["model_name"]
+    assert (directory / "checkpoints" / "last.ckpt").is_file()
+    assert (directory / "checkpoints" / "best.ckpt").is_file()
+    assert events[-1]["type"] == "validation_failure"
+
+
+def test_fine_tuning_uses_original_base_learning_rate(training_config):
+    from jdll_cross_goose.training import resolve_config
+
+    scratch = resolve_config({**training_config, "learning_rate": 0.002})
+    request = {**training_config, "starting_point": "fine_tune", "base_model": "source"}
+    first = resolve_config(request, scratch)
+    second = resolve_config(request, first)
+    assert first["optimizer"]["init_args"]["lr"] == second["optimizer"]["init_args"]["lr"] == 0.0002

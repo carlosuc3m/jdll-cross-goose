@@ -48,6 +48,7 @@ def training_config(tiny_dataset, tmp_path):
         "n_steps": 2,
         "previews": True,
         "seed": 16,
+        "steps_per_epoch": 2,
     }
 
 

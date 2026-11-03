@@ -24,8 +24,10 @@ implementation of `TrainingValidationPreview`. Its `parseSamples` method reads
 ```
 
 Paths are absolute. Images are YX or YXC, labels/probabilities are YX. Source
-images/labels are saved once in NPY format; per-epoch predictions and probabilities
-have immutable filenames. Every array and JSON file is installed by atomic rename
+images, labels, probabilities and predictions are the actual regular-validation
+patches, saved without an additional model pass. Source identity, domain region
+and crop support are included. Per-epoch assets have immutable filenames and
+only the latest two complete epochs are retained. Every array and JSON file is installed by atomic rename
 in the destination directory. `latest.json` is updated only after all referenced
 files exist, so readers cannot observe partially written preview data.
 

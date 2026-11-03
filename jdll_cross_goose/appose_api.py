@@ -173,6 +173,7 @@ def train(
     callback: Callable[[dict], bool | None] | None = None,
     cancellation: Callable[[], bool] | None = None,
     task: object | None = None,
+    control: object | None = None,
 ) -> dict:
     """Train on a canonical JDLL dataset. Cancellation raises CancelledError.
 
@@ -184,7 +185,7 @@ def train(
         events.check()
         from .training import run
 
-        return run(config, events)
+        return run(config, events, control=control)
     except Exception as exc:
         _report_failure(events, exc)
         raise

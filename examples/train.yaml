@@ -5,8 +5,8 @@ architecture: default
 starting_point: scratch
 device: cpu
 epochs: 10
-# All omitted architecture, sampler, augmentation and optimizer settings use
-# upstream configs/model.yaml defaults. These options reduce CPU memory use:
+# Architecture, losses and point sampler retain upstream defaults. Data/runtime
+# policies use JDLL-UNet's shared infrastructure. These reduce CPU memory use:
 batch_size: 2
 num_workers: 0
 previews: true

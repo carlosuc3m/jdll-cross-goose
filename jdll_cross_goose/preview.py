@@ -4,7 +4,6 @@ from pathlib import Path
 
 import numpy as np
 
-from .images import read_image, read_mask
 from .runtime import atomic_path, write_json
 
 
@@ -16,56 +15,54 @@ def save_array(path, array):
 
 
 def write_preview(model, pairs, directory, epoch, config, events):
-    from .inference import prepare_input, segment_normalized
+    previews = getattr(model, "validation_previews", [])
+    if not previews:
+        events.message(
+            "Validation previews unavailable within the configured memory budget.", kind="warning"
+        )
+        return
+    return write_cached_preview(previews, directory, epoch, events)
 
+
+def write_cached_preview(previews, directory, epoch, events):
+    """Publish the exact regular-validation predictions; never forward the model again."""
     directory = Path(directory) / "previews"
     directory.mkdir(parents=True, exist_ok=True)
     samples = []
-    was_training = model.training
-    try:
-        model.eval()
-        for index, pair in enumerate(pairs[: config["adapter"]["preview_samples"]]):
-            events.check()
-            image = read_image(pair.image, config["data"].get("image_axes"))
-            mask = read_mask(pair.mask, config["data"].get("mask_axes"))
-            prepared, _ = prepare_input(image, config, {})
-            result = segment_normalized(
-                model, prepared, model.inference_config, events, progress=False
-            )
-            # Source arrays are cached once, avoiding duplicate image files each
-            # epoch. Java's NPY decoder uses YX and YXC raster axes.
-            image_path = directory / f"sample-{index}-image.npy"
-            mask_path = directory / f"sample-{index}-labels.npy"
-            if not image_path.exists():
-                display = image[0] if image.shape[0] == 1 else image[:3].transpose(1, 2, 0)
-                save_array(image_path, display)
-                save_array(mask_path, mask)
-            prefix = directory / f"epoch-{epoch:04d}-sample-{index}"
-            samples.append(
-                {
-                    "image_path": str(image_path.resolve()),
-                    "label_path": str(mask_path.resolve()),
-                    "source_image_path": pair.image,
-                    "source_label_path": pair.mask,
-                    "prediction_path": save_array(f"{prefix}-prediction.npy", result["labels"]),
-                    "prob_path": save_array(
-                        f"{prefix}-probability.npy", result["cell_probability"]
-                    ),
-                    "initial_plane": 0,
-                }
-            )
-    finally:
-        model.train(was_training)
+    for index, sample in enumerate(previews):
+        events.check()
+        prefix = directory / f"epoch-{epoch:04d}-sample-{index}"
+        image = sample["image"]
+        display = image[0] if np.array_equal(image[0], image[-1]) else image.transpose(1, 2, 0)
+        samples.append(
+            {
+                **sample["metadata"],
+                "image_path": save_array(f"{prefix}-image.npy", display),
+                "label_path": save_array(f"{prefix}-labels.npy", sample["labels"]),
+                "prediction_path": save_array(f"{prefix}-prediction.npy", sample["prediction"]),
+                "prob_path": save_array(f"{prefix}-probability.npy", sample["probability"]),
+                "initial_plane": 0,
+            }
+        )
     value = {"schema_version": 1, "epoch": epoch, "n_dim": 2, "samples": samples}
-    preview = directory / f"epoch-{epoch:04d}.json"
-    latest = directory / "latest.json"
-    write_json(preview, value)
+    path, latest = directory / f"epoch-{epoch:04d}.json", directory / "latest.json"
+    write_json(path, value)
     write_json(latest, value)
+    # Keep the latest two complete asset sets; publish before pruning.
+    for old in directory.glob("epoch-*"):
+        try:
+            number = int(old.name.split("-")[1].split(".")[0])
+        except ValueError:
+            continue
+        if number < epoch - 1:
+            old.unlink(missing_ok=True)
     events.emit(
         {
             "type": "preview",
             "epoch": epoch,
-            "preview_path": str(preview.resolve()),
+            "preview_path": str(path.resolve()),
             "latest_preview_path": str(latest.resolve()),
+            "samples": len(samples),
+            "message": f"Saved validation examples for epoch {epoch} at: {path.resolve()}",
         }
     )

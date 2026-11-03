@@ -18,12 +18,24 @@ constructor otherwise downloads cyto3 unnecessarily. For scratch training this
 also provides genuinely random initial weights, using the current default shared
 embedding topology. Legacy pretrained separate-head models retain their topology.
 
-CanonicalDataset replaces upstream's file discovery and eager process-pool setup
-while reusing transforms and point sampling. It reads source paths directly,
-prepares flow caches sequentially, handles empty masks, and omits prefetch_factor
-for zero-worker loaders. No monkey-patches or changes to installed upstream files
-are made. Normalization uses upstream M1P1/N99 with a finite constant-image guard:
+The shared JDLL-UNet data layer replaces eager process-pool loading. It reads
+patches first, keeps bounded raw/flow caches, prepares sparse flows sequentially
+from complete object bounding boxes, and does not spawn DataLoader workers.
+RandomOnCellV2's calculation is retained with an explicit per-patch Torch RNG
+to avoid interference between prefetch and model randomness. Tests verify exact
+same-seed sampler outputs and exact sparse-flow equality against upstream.
+No monkey-patches or changes to installed upstream files are made.
+Normalization uses upstream M1P1/N99 with a finite constant-image guard:
 constant M1P1 images become -1, and constant N99 images become 0.
+For large images N99 percentiles use a logged, deterministic bounded sample.
+
+Shared nnU-Net-inspired augmentation, scale normalization, annotation cleanup,
+sampling and runtime optimizations are adapter policies, not claims about the
+paper's training schedule. Geometric transforms carry a source-coordinate field;
+its inverse Jacobian transforms sparse flow directions while preserving the
+original interpolated magnitudes. Photometric operations never alter coordinates
+or flow targets. A cropped object keeps its complete source-domain flow center.
+Synthetic padding is excluded from cell-probability loss and AP evaluation.
 
 ## Tiling
 
@@ -74,19 +86,20 @@ upstream settings are retained.
 
 ## Scale and instance labels
 
-Training records `2 * sqrt(area / pi)` for every nonzero instance in the actual
-training split (before crops), saving count, mean, median, min and max. Given an
+Training estimates per-source equivalent-area diameters from prepared training
+masks, with border-aware sampling and an explicit fallback. It records original
+and nominally scale-normalized per-source medians. Given an
 input diameter D, inference uses `training_median / D` as its isotropic scale.
 It reconstructs continuous maps and instances at that normalized resolution,
 then restores the original shape. The original pretrained config supplies no
 training-diameter statistics: the adapter rejects an object-size override for
 such models. It does not infer those statistics from Cellpose's backbone diameter.
 
-Integer label IDs are never converted into connected components during ingestion.
-Touching labels remain separate, and border labels are retained. As in upstream,
-augmentation may renumber IDs one-to-one. Upstream flow generation keeps the
-largest connected component *per instance* while generating its target flow;
-this behavior is retained. Ground-truth masks themselves remain intact. A single
+Shared annotation preparation can repair disconnected components sharing an ID
+and filter tiny artifacts; both policies are configurable and reported.
+Touching different labels remain separate. Patch IDs are compacted before
+interpolation to avoid float32 corruption of large original IDs. Original source
+files remain intact. Upstream flow generation itself is unchanged. A single
 YX label raster cannot encode two simultaneous labels at a crossing pixel. The
 adapter follows JDLL's raster contract and does not claim multilabel overlap output.
 

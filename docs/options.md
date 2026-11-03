@@ -63,33 +63,65 @@ Required: `model_name`, `output_dir`, `dataset_path`, `architecture="default"`,
 Fine-tuning additionally requires `base_model`. Paths in configs are resolved
 relative to the process working directory, including CLI YAML configs.
 
-Architecture, loss weights, AdamW options, augmentation, and sampler defaults come
-from the pinned upstream `configs/model.yaml`. Scratch training uses random
-weights with that topology. Optional documented overrides:
+Architecture, loss weights, AdamW and point-sampler defaults come from the pinned
+upstream `configs/model.yaml`. Data reading, sampling and augmentation use shared
+JDLL-UNet utilities. Scratch training uses random weights with the upstream
+topology. Optional documented overrides:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `model_dir` | `output_dir/model_name` | Exact final model directory, used by JDLL. An existing `training-ui.log` is permitted; all other existing files/directories are refused to protect previous runs. |
 | `checkpoint` | `best` for fine-tuning | Base checkpoint selector |
-| `batch_size`, `val_batch_size` | 8, 2 | Data-loader batch sizes |
-| `num_workers` | 0 | Worker processes; zero runs data loading in the calling process |
-| `prefetch_factor` | 4 | Used only when workers are enabled |
-| `patch_size`, `val_patch_size` | 256, 512 | Square training/random and validation/center crops; multiples of 16, at least 32 |
+| `batch_size`, `val_batch_size` | CPU 2 / accelerator 8; validation 2 | Physical data-loader batch sizes; `batch_size="auto"` selects these conservative values, not a memory probe |
+| `effective_batch_size` | 8, or an explicitly supplied batch size | Gradient accumulation; must be a multiple of physical batch size |
+| `num_workers` | 0 | Must remain zero for the shared runtime; no worker processes are spawned |
+| `batch_prefetch` | CUDA true; otherwise false | One batch ahead in a context-propagating thread; configurable on every device |
+| `prefetch_factor` | 4 | Accepted legacy field; no effect with zero worker processes |
+| `mixed_precision` | CUDA true; CPU/MPS false | Boolean or `auto` |
+| `patch_size`, `val_patch_size` | 256, 512 | Square patches; multiples of 16, at least 32; validation uses fixed per-patch seeds |
 | `seed` | 16 | Python, NumPy, PyTorch, split, and data-loader seed |
 | `deterministic` | false | Lightning deterministic mode; may reject unsupported accelerator operations |
 | `n_steps` | 200, or base model value | Validation and saved inference flow steps |
-| `learning_rate`, `weight_decay` | 0.005, 0.01 | AdamW parameters |
+| `learning_rate`, `weight_decay` | scratch 0.005; fine-tune 0.1 times source base LR; weight decay 0.01 | Explicit overrides supported |
+| `optimizer`, `lr_scheduler` | `adamw`, `{"type":"none"}` | Optional Adam/SGD and shared none/poly/cosine/plateau scheduler. AP@0.75 monitors Plateau; full-image AP never controls the scheduler |
 | `n_samples`, `sigma` | 200, 4.0 | Upstream RandomOnCellV2 samples per patch and perturbation |
-| `bootstrap_factor` | 1 | Number of sampled patches per source image per epoch |
+| `bootstrap_factor` | 1 | Multiplier in automatic area-biased patch expansion |
 | `gridflow_n_interpol` | 11 | Upstream sparse-flow interpolation neighbors |
 | `center_method` | `graph_center_weighted` | Upstream flow center method |
 | `grayscale` | true, or base model setting | Channel averaging policy |
 | `image_normalization` | `M1P1`, or base model setting | `M1P1` or `N99` |
 | `image_axes`, `mask_axes` | file metadata/detection | Optional `CYX` or `YXC` axis hints for multichannel files |
-| `validation_fraction` | 0.2 | Seeded holdout if a validation subset was not supplied |
-| `previews`, `preview_samples` | true, 1 | One event each epoch containing up to this many full validation images |
-| `tile_size`, `tile_overlap`, `flow_batch_size` | inference defaults | Tiling and flow batching for validation and previews |
+| `validation_fraction` | 0.15 | Source-wise split, or a disjoint spatial holdout for a single source |
+| `previews`, `preview_samples` | true, 1 | Cache up to this many regular-validation predictions; no extra forward pass; 256 MiB preview-asset RAM limit |
+| `preview_memory_mb` | 256 | Configurable cap for cached preview assets |
+| `tile_size`, `tile_overlap`, `flow_batch_size` | inference defaults | Tiling and flow batching for optional full validation; flow batching also applies to patch reconstruction |
 | `allow_device_fallback` | false | Explicit warning plus device metadata if CPU fallback is needed |
+
+Shared data options:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `data_cache_mb` | `auto` | Raw-source plus sparse-flow cache; at most 2 GiB / 10% available RAM automatically; zero disables retention |
+| `foreground_oversampling`, `foreground_probability` | true, 0.4 | Foreground-biased training crop selection |
+| `skip_empty_images`, `skip_empty_patches` | true, true | Skip unannotated training sources/patches, not genuine validation backgrounds |
+| `empty_patch_fraction` | 0 | Explicit empty-patch fraction; takes precedence over skip-empty for those slots |
+| `empty_patch_max_retries`, `include_empty_patches_after_max_retries` | 8, false | Bounded mask-first retries and optional negative fallback |
+| `max_padding_ratio` | 1 | Maximum synthetic padding per side, relative to real axis size |
+| `steps_per_epoch` | `auto` | Explicit optimizer updates, or area-biased automatic expansion |
+| `minimum_patches_per_epoch`, `minimum_steps_per_epoch`, `expected_patches_per_case` | 1000, 1, 10 | Automatic epoch sizing; rounded to complete effective batches |
+| `validation_steps` | `auto` | Explicit validation batches, otherwise approximately one patch per validation patch-area, covering every source |
+| `augmentation_profile`, `augmentation` | `fast`, `{}` | Shared fast/light-balanced/balanced/strong profile and per-parameter overrides; coordinates/flow directions receive only geometric changes |
+| `instance_scale_normalization` | shared defaults, mode `downsample_only` | Per-source training diameter, target fraction 0.25, jitter [0.5,2], scale bounds [0.25,4]; validation uses training reference size, no jitter |
+| `annotation_preparation` | shared defaults | Repair disconnected IDs; tiny-instance cleanup; 128 MiB prepared-mask RAM budget and compact disk spill. Source files are never altered |
+| `normalization_sample_pixels` | 1048576 | Exact M1P1 extrema; deterministic bounded N99 percentile samples for larger sources |
+| `validation` | `{"full_every":0,"full_memory_mb":512}` | Optional periodic full-image validation and pre-decode host working-memory safeguard |
+
+Automatic training sampling weights sources by patch area and covers every source
+before drawing additional patches. Normalization is fitted once per source and
+reused. A single-source holdout fits normalization/scale from its training region;
+its validation region cannot contribute those statistics. Size-based annotation
+filtering is disabled and logged in that shared-source case. Augmentations and
+context never cross the held-out boundary.
 
 Unknown options fail to catch misspellings. Fully resolved configuration is saved.
 Fine-tuning does not resume optimizer state; it creates a new run from selected
@@ -109,16 +141,20 @@ epoch summaries include `epoch_complete=true` and the aggregated losses/metrics.
 ## Dataset and cancellation
 
 Images: TIFF/TIF, PNG, JPEG/JPG, BMP. Masks: TIFF/TIF, PNG, BMP. Pairing is
+also supported with NPY images/masks following JDLL's paired axis convention.
+Canonical Python pairing is
 case-insensitive by stem, stripping `_img`/`_image` from image names and
 `_mask`/`_masks`/`_label`/`_labels` from mask names. Duplicate normalized stems,
 unpaired files, invalid pixels, negative/non-integer masks, and mismatched shapes
-fail before training. Floating masks are rejected even if their values happen to
-be integral. Multichannel masks use channel zero and emit a warning.
+fail before training. Shared annotation validation rejects non-finite,
+negative and non-integer label values; integral numeric masks are accepted.
+Multichannel masks use channel zero with a warning.
 
 No source-image copies or links are needed for training. Sequential flow caches
 and the dataset manifest list generated paths. Preview NPY copies are necessary
 for JDLL's existing NPY decoder and are generated only when previews are enabled.
-Empty masks/patches are sampled, with cell probability loss and zero flow loss.
+Empty masks/patches are skipped in training by default, but may be explicitly
+enabled; negative patches have cell probability loss and zero flow loss.
 Empty/empty validation predictions receive AP=1 instead of an undefined NaN.
 
 Callbacks returning exactly `False` cancel. Callback exceptions are logged and
@@ -132,6 +168,18 @@ latency by one chunk computation, not the full number of flow steps.
 `train(task=task)` sends JSON events as `task.update(message=..., current=...,
 maximum=...)`; all core logic also works with plain callbacks. No Appose objects
 are imported or required.
+
+`train(control=...)` accepts a `jdll_unet.validation_control.FullValidationController`
+or a callable returning unique request IDs. Callback `False` still means cancel,
+never a full-validation command. Requests are captured once at each epoch-end
+boundary; late arrivals wait for the next boundary. New requests during a pass
+survive its completion. With a periodic interval N, a pass at E shifts the next
+pass to E+N. There is no implicit final pass and no extra epoch for late requests.
+Lifecycle events use `type="full_validation"` with ready/pending/accepted/started/
+completed/failed/cancelled/closed statuses. Case metrics are in
+`full_validation/epoch-NNNN.json`, outside regular history and checkpoint selection.
+Full evaluation is sequential and tiled but still requires host memory for global
+embedding grids/reconstruction; the configurable safeguard refuses oversized cases.
 
 Errors live in `jdll_cross_goose.runtime`: `CancelledError`, `TrainingError`,
 `ValidationError`, `EnvironmentError`. Configuration/input problems use

@@ -5,6 +5,8 @@ and training from Python, the command line, or a JDLL/Appose task. Appose itself
 not a dependency. Installation automatically pulls a revision-pinned fork of the
 upstream package. The fork changes only the dependency from regular to headless
 OpenCV; the upstream model code is unchanged.
+The training data layer reuses a revision-pinned `jdll-unet[region-reading]`
+dependency, not UNet's network or losses.
 
 ## Install
 
@@ -90,9 +92,21 @@ dataset/
 ```
 
 Each subset may contain many image/mask pairs. Mixed image extensions are
-supported. Without a `val` subset, a seeded 20% validation split is generated
-from at least two training pairs. Source images and masks remain in place;
+supported, including NPY and mixed raster/NPY pairs. Without a `val` subset, a
+seeded 15% validation split is generated. A single image uses disjoint spatial
+training/validation regions instead; an image too small for this fails clearly.
+JDLL Java accepts its broad dataset layouts and links/renames them when needed;
+the standalone Python API accepts the canonical layout above or `images/masks`.
+Source images and masks remain in place;
 flow caches and a manifest are written under the new model directory.
+
+Training reads requested patches rather than retaining all decoded images.
+Memory-mappable and region-readable formats avoid full decoding when possible;
+PNG/JPEG and other non-region-readable inputs still require full-image decoding.
+A bounded cache reuses decoded sources, ranked by planned patches per byte when
+full. Its automatic total budget is at most 2 GiB and 10% of available RAM,
+split between raw sources (75%) and sparse flows (25%). Annotation preparation
+has its own configurable RAM/spill budget. This is not a whole-process RAM limit.
 
 Edit [examples/train.yaml](examples/train.yaml), then:
 
@@ -117,6 +131,9 @@ result = train({
 For fine-tuning, set `starting_point="fine_tune"`,
 `base_model="models/default"` (or an adapter-trained model), and a new `model_name`.
 Fine-tuning starts a new optimizer/run and leaves the source model untouched.
+Its default LR is 0.1 times the original base learning rate, not a compounded
+reduction when fine-tuning an already fine-tuned model. An explicit
+`learning_rate` overrides it.
 Both original separate embeddings and the current default shared embeddings are
 supported for fine-tuning the default FlowLinear architecture.
 
@@ -127,8 +144,13 @@ runs/my-model/
   config.yaml
   checkpoints/last.ckpt
   checkpoints/best.ckpt
+  checkpoints/best_ap_0.5.ckpt
+  checkpoints/best_ap_0.75.ckpt
+  checkpoints/best_ap_0.9.ckpt
   checkpoints/best-epoch=...-step=...-val_ap_0.75=....ckpt
-  dataset-cache/*.npz
+  dataset-cache/<mask-hash>/*.npz
+  validation_plan.json
+  annotation_statistics.json
   dataset.json
   history.json
   previews/latest.json
@@ -136,6 +158,14 @@ runs/my-model/
   previews/*.npy
   result.json
 ```
+
+The configurable shared data layer adds foreground/empty-patch policies,
+object-scale normalization and jitter, augmentation profiles, gradient
+accumulation, mixed precision and single-batch threaded prefetch without worker
+processes. Defaults and scientific differences are documented below. Regular
+validation forwards each patch once for losses, AP and previews. Full-image
+validation is disabled by default; periodic or run-scoped one-shot requests
+write separate per-case results and never select checkpoints.
 
 Checkpoints contain full Lightning state and reload through `load_model`.
 `best.ckpt` follows validation AP at IoU 0.75, the first monitor in upstream's
