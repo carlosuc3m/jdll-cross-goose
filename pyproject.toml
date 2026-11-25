@@ -10,7 +10,7 @@ readme = "README.md"
 license-files = ["THIRD_PARTY_LICENSES.txt"]
 requires-python = ">=3.11"
 dependencies = [
-  "jdll-unet[region-reading] @ git+https://github.com/carlosuc3m/jdll-unet.git@7e40acbfb2545c702357d31e8330ea7269d9a79a",
+  "jdll-unet[region-reading] @ git+https://github.com/carlosuc3m/jdll-unet.git@6cd0b25a3c971853d47b3869d7e3ba58ff70a545",
   "crossgoose @ git+https://github.com/carlosuc3m/cross-goose.git@2eef5e347801da8a389117d21dd88cc9b6c35c40",
   "numpy>=2,<3",
   "torch>=2.4,<3",
