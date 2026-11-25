@@ -143,7 +143,8 @@ class TrainingData:
             kind="dataset",
         )
         root = Path(root)
-        train, val = pairs_in(root / "train"), pairs_in(root / "val")
+        supplied = continuation.pair_lists(root, ImageMaskPair) if continuation else None
+        train, val = supplied if supplied else (pairs_in(root / "train"), pairs_in(root / "val"))
         if not train:
             train = pairs_in(root)
         train, val = [self._inspect(p) for p in train], [self._inspect(p) for p in val]

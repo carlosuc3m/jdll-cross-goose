@@ -551,8 +551,11 @@ def run(request, events, control=None):
         .expanduser()
         .resolve()
     )
+    allowed = {"training-ui.log"}
+    if run_state:
+        allowed.update({"split.json", "validation.sha256", "continuation.json", ".training.lock"})
     if directory.exists() and any(
-        p.name not in {"training-ui.log", "split.json", "validation.sha256", "continuation.json", ".training.lock"}
+        p.name not in allowed
         or not p.is_file() for p in directory.iterdir()
     ):
         raise FileExistsError(
