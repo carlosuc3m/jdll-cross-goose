@@ -280,6 +280,9 @@ class Progress(L.Callback):
         self.best_by_threshold = {str(t): -math.inf for t in (0.5, 0.75, 0.9)}
         self.last_path = directory / "checkpoints" / "last.ckpt"
         self.total_steps = 0
+        self.offset = 0
+        self.run = None
+        self.step_offset = 0
 
     def control_event(self, kind, **fields):
         self.events.emit({"type": kind, **fields}, check=False)
@@ -316,19 +319,41 @@ class Progress(L.Callback):
             self.total_steps,
             trainer.max_epochs,
         )
+        if self.run and self.run.selected:
+            slot = self.run.selected
+            steps = max(1, self.total_steps // trainer.max_epochs)
+            self.step_offset = self.offset * steps
+            self.total_steps += self.step_offset
+            if slot["restore"]:
+                bundle = torch.load(self.run.parent / slot["state"], map_location="cpu", weights_only=False)
+                trainer.optimizers[0].load_state_dict(bundle["optimizer_states"][0])
+                state = bundle["callbacks"][self.state_key]["scheduler"]
+                exact = self.scheduler.continue_from(state, trainer.max_epochs, steps, self.run.validation_changed)
+                if self.scheduler.type == "plateau" and self.run.validation_changed:
+                    self.scheduler.best_score = self.best_score
+                plugin = trainer.precision_plugin
+                if plugin.__class__.__qualname__ in bundle:
+                    plugin.load_state_dict(bundle[plugin.__class__.__qualname__])
+                self.events.message("Restored optimizer and " + ("original LR schedule." if exact else "replanned remaining LR schedule."))
+            else:
+                self.events.message("Restoring weights with a fresh optimizer.")
+            self.best_path = self.last_path.parent / "best.ckpt"
+            with atomic_path(self.best_path) as temporary:
+                trainer.save_checkpoint(temporary, weights_only=False)
+            self.run.checkpoint("best", self.offset, self.best_path, self.best_path, self.best_score)
         self.schedule.event("ready", supported=True)
-        self.emit_progress(trainer, epoch=0)
+        self.emit_progress(trainer, epoch=self.offset)
 
     def emit_progress(self, trainer, *, epoch=None):
         self.events.emit(
             {
                 "type": "progress",
                 "message": "",
-                "epoch": trainer.current_epoch + 1 if epoch is None else epoch,
-                "step": trainer.global_step,
-                "total_epochs": trainer.max_epochs,
+                "epoch": trainer.current_epoch + 1 + self.offset if epoch is None else epoch,
+                "step": (trainer.global_step + self.step_offset),
+                "total_epochs": (trainer.max_epochs + self.offset),
                 "total_steps": self.total_steps,
-                "current": trainer.global_step,
+                "current": (trainer.global_step + self.step_offset),
                 "maximum": self.total_steps,
                 "losses": {},
                 "metrics": {},
@@ -336,11 +361,11 @@ class Progress(L.Callback):
         )
 
     def on_train_epoch_start(self, trainer, pl_module):
-        trainer.train_dataloader.dataset.set_epoch(trainer.current_epoch)
+        trainer.train_dataloader.dataset.set_epoch(trainer.current_epoch + self.offset)
         write_json(
-            self.directory / "sampling" / f"epoch_{trainer.current_epoch + 1:04d}.json",
+            self.directory / "sampling" / f"epoch_{trainer.current_epoch + 1 + self.offset:04d}.json",
             {
-                "epoch": trainer.current_epoch + 1,
+                "epoch": trainer.current_epoch + 1 + self.offset,
                 "source_requests": [
                     {"source": key[0], "role": key[1], "patches": value}
                     for key, value in trainer.train_dataloader.dataset.cache_requests.items()
@@ -348,9 +373,9 @@ class Progress(L.Callback):
             },
         )
         self.events.message(
-            f"Starting epoch {trainer.current_epoch + 1}/{trainer.max_epochs}",
+            f"Starting epoch {trainer.current_epoch + 1 + self.offset}/{(trainer.max_epochs + self.offset)}",
             kind="epoch_start",
-            epoch=trainer.current_epoch + 1,
+            epoch=trainer.current_epoch + 1 + self.offset,
         )
 
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
@@ -363,16 +388,16 @@ class Progress(L.Callback):
         if not torch.isfinite(loss).all():
             raise TrainingError("Training produced a non-finite loss")
         every = 1 if pl_module.device.type == "cpu" else 5
-        if trainer.global_step != self.previous_step:
+        if (trainer.global_step + self.step_offset) != self.previous_step:
             self.scheduler.step_batch()
-            self.previous_step = trainer.global_step
-            if trainer.global_step % every == 0:
+            self.previous_step = (trainer.global_step + self.step_offset)
+            if (trainer.global_step + self.step_offset) % every == 0:
                 self.emit_progress(trainer)
 
     def on_validation_start(self, trainer, pl_module):
-        self.full_pass = self.schedule.boundary(trainer.current_epoch + 1)
+        self.full_pass = self.schedule.boundary(trainer.current_epoch + 1 + self.offset)
         pl_module.validation_previews = []
-        self.events.message(f"Validating epoch {trainer.current_epoch + 1}", kind="validation")
+        self.events.message(f"Validating epoch {trainer.current_epoch + 1 + self.offset}", kind="validation")
 
     def on_validation_batch_start(self, trainer, pl_module, batch, batch_idx, dataloader_idx=0):
         self.events.check()
@@ -384,7 +409,7 @@ class Progress(L.Callback):
             {
                 "type": "validation",
                 "status": "progress",
-                "epoch": trainer.current_epoch + 1,
+                "epoch": trainer.current_epoch + 1 + self.offset,
                 "current": batch_idx + 1,
                 "maximum": trainer.num_val_batches[dataloader_idx],
                 "unit": "batches",
@@ -394,7 +419,7 @@ class Progress(L.Callback):
 
     def on_train_epoch_end(self, trainer, pl_module):
         self.events.check()
-        epoch = trainer.current_epoch + 1
+        epoch = trainer.current_epoch + 1 + self.offset
         values = trainer.callback_metrics
         losses = {
             "train/total_loss": float(values["loss"]),
@@ -420,7 +445,7 @@ class Progress(L.Callback):
             self.best_score = score
             self.best_path = (
                 self.last_path.parent
-                / f"best-epoch={epoch}-step={trainer.global_step}-val_ap_0.75={score:.4f}.ckpt"
+                / f"best-epoch={epoch}-step={(trainer.global_step + self.step_offset)}-val_ap_0.75={score:.4f}.ckpt"
             )
         # Save a full checkpoint atomically after every successfully validated
         # epoch, before callbacks/previews can cancel or fail.
@@ -429,8 +454,13 @@ class Progress(L.Callback):
         if improved:
             checkpoints.copy_checkpoint(self.last_path, self.best_path)
             checkpoints.copy_checkpoint(self.last_path, self.last_path.parent / "best.ckpt")
-            if previous_best is not None and previous_best != self.best_path:
+            if previous_best is not None and previous_best != self.best_path and previous_best.name != "best.ckpt":
                 previous_best.unlink(missing_ok=True)
+        if self.run:
+            self.run.checkpoint("last", epoch, self.last_path, self.last_path, score)
+            if improved:
+                path = self.last_path.parent / "best.ckpt"
+                self.run.checkpoint("best", epoch, path, path, score)
         for threshold in improved_thresholds:
             checkpoints.copy_checkpoint(
                 self.last_path, self.last_path.parent / f"best_ap_{threshold}.ckpt"
@@ -456,10 +486,10 @@ class Progress(L.Callback):
                 "epoch_complete": True,
                 "message": f"Epoch {epoch}: train loss {losses['train/total_loss']:.5f}, val AP@0.75 {score:.4f}",
                 "epoch": epoch,
-                "step": trainer.global_step,
-                "total_epochs": trainer.max_epochs,
+                "step": (trainer.global_step + self.step_offset),
+                "total_epochs": (trainer.max_epochs + self.offset),
                 "total_steps": self.total_steps,
-                "current": trainer.global_step,
+                "current": (trainer.global_step + self.step_offset),
                 "maximum": self.total_steps,
                 "losses": losses,
                 "metrics": metrics,
@@ -507,6 +537,8 @@ class Progress(L.Callback):
 
 
 def run(request, events, control=None):
+    request = dict(request)
+    run_state = request.pop("_jdll_run", None)
     request = copy.deepcopy(request)
     cfg = resolve_config(request)
     # JDLL already chooses a unique final directory and starts its UI log there.
@@ -520,7 +552,8 @@ def run(request, events, control=None):
         .resolve()
     )
     if directory.exists() and any(
-        p.name != "training-ui.log" or not p.is_file() for p in directory.iterdir()
+        p.name not in {"training-ui.log", "split.json", "validation.sha256", "continuation.json", ".training.lock"}
+        or not p.is_file() for p in directory.iterdir()
     ):
         raise FileExistsError(
             f"Model output directory is not empty: {directory}; choose a new model_name"
@@ -539,7 +572,8 @@ def run(request, events, control=None):
         events.message("Validating dataset images and integer instance masks", kind="dataset")
         if request["starting_point"] == "fine_tune":
             model, metadata = checkpoints.load(
-                request["base_model"],
+                run_state.parent / run_state.selected["state" if run_state.selected["restore"] else "weights"]
+                if run_state and run_state.selected else request["base_model"],
                 str(device),
                 criterion=request.get("checkpoint", "best"),
                 events=events,
@@ -547,6 +581,11 @@ def run(request, events, control=None):
             validate_default_architecture(metadata["config"])
             cfg = resolve_config(runtime_request, metadata["config"])
             cfg["adapter"]["source_checkpoint"] = metadata["checkpoint_path"]
+            if run_state and run_state.selected:
+                previous = metadata["config"]
+                cfg["optimizer"] = copy.deepcopy(previous["optimizer"])
+                for name in ("optimizer", "lr_scheduler"):
+                    cfg["adapter"][name] = copy.deepcopy(previous["adapter"][name])
             model.n_steps = cfg["model"]["n_steps"]
         else:
             events.message("Initializing upstream default architecture with random weights")
@@ -555,7 +594,9 @@ def run(request, events, control=None):
 
         directory.mkdir(parents=True, exist_ok=True)
         data = TrainingData(cfg["data"], directory, events)
-        train_pairs, val_pairs, statistics = data.prepare(request["dataset_path"])
+        train_pairs, val_pairs, statistics = data.prepare(request["dataset_path"], run_state)
+        if run_state:
+            run_state.record_domains(*[[(p.image, p.mask, p.region) for p in group] for group in (train_pairs, val_pairs)])
         train_loader, val_loader = data.make_loaders()
         cfg["data"]["resolved_patches_per_epoch"] = len(train_loader.dataset)
         cfg["data"]["resolved_validation_patches"] = len(val_loader.dataset)
@@ -593,7 +634,16 @@ def run(request, events, control=None):
         }
         model.to(device).train()
         progress = Progress(events, directory, cfg, data, control)
+        progress.run = run_state
+        progress.offset = run_state.start if run_state else 0
         trainer = L.Trainer(**cfg["trainer"], callbacks=[progress], default_root_dir=str(directory))
+        if run_state and run_state.selected:
+            score = run_state.selected.get("score")
+            if run_state.validation_changed or score is None:
+                trainer.validate(model, dataloaders=val_loader, verbose=False)
+                score = float(trainer.callback_metrics["val_ap_0.75"])
+                events.message(f"Scored the starting weights on the new validation split: AP@0.75 {score:.4f}.")
+            progress.best_score = score
         trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
         events.check()
         progress.close()

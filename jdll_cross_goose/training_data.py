@@ -137,7 +137,7 @@ class TrainingData:
             raise ValueError(f"Cross-GOOSE training requires 2D images: {pair.image}")
         return domain
 
-    def prepare(self, root):
+    def prepare(self, root, continuation=None):
         self.events.message(
             f"Data cache budget: {self.cache_budget / 1024**2:.0f} MiB; crop-first reading enabled.",
             kind="dataset",
@@ -147,6 +147,8 @@ class TrainingData:
         if not train:
             train = pairs_in(root)
         train, val = [self._inspect(p) for p in train], [self._inspect(p) for p in val]
+        if continuation:
+            train, val = continuation.restore_domains(train, val, self.events.message)
         if not train:
             raise ValueError(f"No training image/mask pairs in {root}")
         if not val:
